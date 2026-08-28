@@ -12,7 +12,7 @@ hardware.SIDE_NAMES = {
 
 local function call(object, method, ...)
   local fn = object and object[method]
-  if type(fn) ~= "function" then
+  if fn == nil then
     return nil, "missing method " .. tostring(method)
   end
   local values = table.pack(pcall(fn, ...))
