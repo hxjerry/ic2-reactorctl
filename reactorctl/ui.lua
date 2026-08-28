@@ -1,7 +1,7 @@
 local UI = {}
 UI.__index = UI
 
-local COLORS = {
+local RGB = {
   background = 0x101318,
   foreground = 0xD8DEE9,
   muted = 0x7F8C9F,
@@ -11,15 +11,25 @@ local COLORS = {
   accent = 0x78DCE8,
 }
 
+local PALETTE_INDEX = {
+  background = 0,
+  foreground = 15,
+  muted = 8,
+  good = 10,
+  warning = 14,
+  bad = 12,
+  accent = 11,
+}
+
 local STATE_COLORS = {
-  RUNNING = COLORS.good,
-  NO_FUEL = COLORS.warning,
-  STOPPING = COLORS.warning,
-  COOLANT = COLORS.warning,
-  BLOCKED = COLORS.bad,
-  FAULT = COLORS.bad,
-  DISARMED = COLORS.muted,
-  VERIFYING = COLORS.accent,
+  RUNNING = "good",
+  NO_FUEL = "warning",
+  STOPPING = "warning",
+  COOLANT = "warning",
+  BLOCKED = "bad",
+  FAULT = "bad",
+  DISARMED = "muted",
+  VERIFYING = "accent",
 }
 
 local function clip(text, width)
@@ -28,6 +38,26 @@ local function clip(text, width)
     return text:sub(1, math.max(0, width - 1)) .. "~"
   end
   return text
+end
+
+local function formatColumns(self, name, state, heat, output, reason)
+  local fixedWidth = self.nameWidth + self.stateWidth + self.heatWidth + self.outputWidth + 4
+  local reasonWidth = math.max(1, self.width - fixedWidth)
+  local format = string.format(
+    "%%-%ds %%-%ds %%%ds %%%ds %%s",
+    self.nameWidth,
+    self.stateWidth,
+    self.heatWidth,
+    self.outputWidth
+  )
+  return string.format(
+    format,
+    clip(name, self.nameWidth),
+    clip(state, self.stateWidth),
+    clip(heat, self.heatWidth),
+    clip(output, self.outputWidth),
+    clip(reason, reasonWidth)
+  )
 end
 
 function UI.new(component)
@@ -42,17 +72,53 @@ function UI.new(component)
   local maxWidth, maxHeight = self.gpu.maxResolution()
   self.width = math.min(maxWidth, 100)
   self.height = math.min(maxHeight, 32)
-  pcall(self.gpu.setResolution, self.width, self.height)
-  local maxDepth = self.gpu.maxDepth()
-  if maxDepth >= 8 then
-    pcall(self.gpu.setDepth, 8)
-  elseif maxDepth >= 4 then
-    pcall(self.gpu.setDepth, 4)
+  if self.width < 30 or self.height < 8 then
+    error(string.format("screen is too small: %dx%d", self.width, self.height))
   end
-  self.gpu.setBackground(COLORS.background)
-  self.gpu.setForeground(COLORS.foreground)
+  self.gpu.setResolution(self.width, self.height)
+
+  self.depth = self.gpu.maxDepth()
+  if self.depth >= 8 then
+    self.depth = 8
+  elseif self.depth >= 4 then
+    self.depth = 4
+  else
+    self.depth = 1
+  end
+  self.gpu.setDepth(self.depth)
+
+  self.colors = {}
+  if self.depth == 4 then
+    for name, index in pairs(PALETTE_INDEX) do
+      self.gpu.setPaletteColor(index, RGB[name])
+      self.colors[name] = {value = index, palette = true}
+    end
+  elseif self.depth == 1 then
+    self.colors.background = {value = 0x000000, palette = false}
+    for name in pairs(RGB) do
+      self.colors[name] = self.colors[name] or {value = 0xFFFFFF, palette = false}
+    end
+  else
+    for name, value in pairs(RGB) do
+      self.colors[name] = {value = value, palette = false}
+    end
+  end
+
+  self.nameWidth = self.width >= 70 and 10 or 8
+  self.stateWidth = self.width >= 70 and 11 or 8
+  self.heatWidth = self.width >= 70 and 7 or 6
+  self.outputWidth = self.width >= 70 and 10 or 7
+
+  self:setColors("foreground", "background")
   self.gpu.fill(1, 1, self.width, self.height, " ")
   return self
+end
+
+function UI:setColors(foreground, background)
+  local foregroundColor = self.colors[foreground or "foreground"]
+  local backgroundColor = self.colors[background or "background"]
+  self.gpu.setBackground(backgroundColor.value, backgroundColor.palette)
+  self.gpu.setForeground(foregroundColor.value, foregroundColor.palette)
 end
 
 function UI:setLine(row, text, foreground, background)
@@ -60,17 +126,48 @@ function UI:setLine(row, text, foreground, background)
     return
   end
   text = clip(text, self.width)
-  foreground = foreground or COLORS.foreground
-  background = background or COLORS.background
-  local key = string.format("%06x:%06x:%s", foreground, background, text)
+  foreground = foreground or "foreground"
+  background = background or "background"
+  local key = foreground .. ":" .. background .. ":" .. text
   if self.previous[row] == key then
     return
   end
   self.previous[row] = key
-  self.gpu.setBackground(background)
-  self.gpu.setForeground(foreground)
+  self:setColors(foreground, background)
   self.gpu.fill(1, row, self.width, 1, " ")
   self.gpu.set(1, row, text)
+end
+
+function UI:setSegments(row, segments)
+  if not self.enabled or row < 1 or row > self.height then
+    return
+  end
+
+  local remaining = self.width
+  local parts = {}
+  local keyParts = {}
+  for _, segment in ipairs(segments) do
+    if remaining > 0 then
+      local text = clip(segment.text, remaining)
+      parts[#parts + 1] = {text = text, color = segment.color or "foreground"}
+      keyParts[#keyParts + 1] = parts[#parts].color .. ":" .. text
+      remaining = remaining - #text
+    end
+  end
+  local key = table.concat(keyParts, "|")
+  if self.previous[row] == key then
+    return
+  end
+  self.previous[row] = key
+
+  self:setColors("foreground", "background")
+  self.gpu.fill(1, row, self.width, 1, " ")
+  local column = 1
+  for _, part in ipairs(parts) do
+    self:setColors(part.color, "background")
+    self.gpu.set(column, row, part.text)
+    column = column + #part.text
+  end
 end
 
 function UI:render(snapshot)
@@ -78,57 +175,54 @@ function UI:render(snapshot)
     return
   end
 
+  self:setSegments(1, {
+    {text = "ReactorCtl "},
+    {text = snapshot.armed and "[A]ON" or "[A]OFF", color = snapshot.armed and "good" or "warning"},
+    {text = " [R]eset [Q]uit ", color = "muted"},
+    {text = snapshot.watchdogLevel ~= 0 and "*" or " ", color = "accent"},
+  })
   self:setLine(
-    1,
-    string.format(
-      " Reactor Controller   armed=%s   watchdog=%s   [A] arm/disarm [R] reset faults [Q] quit",
-      snapshot.armed and "YES" or "NO",
-      snapshot.watchdogLevel ~= 0 and "pulse" or "idle"
-    ),
-    snapshot.armed and COLORS.good or COLORS.warning
-  )
-  self:setLine(2, string.rep("-", self.width), COLORS.muted)
-  self:setLine(
-    3,
-    string.format(" %-10s %-11s %8s %12s  %s", "Reactor", "State", "Heat", "EU/t", "Reason"),
-    COLORS.accent
+    2,
+    formatColumns(self, "Reactor", "State", "Heat", "EU/t", "Reason"),
+    "accent"
   )
 
-  local row = 4
+  local separatorRow = self.height - 2
+  local row = 3
   for _, reactor in ipairs(snapshot.reactors) do
-    if row > self.height - 5 then
+    if row >= separatorRow then
       break
     end
     local heat = "--"
     if reactor.maxHeat and reactor.maxHeat > 0 then
-      heat = string.format("%6.1f%%", 100 * reactor.heat / reactor.maxHeat)
+      heat = string.format("%.1f%%", 100 * reactor.heat / reactor.maxHeat)
     end
-    local output = string.format("%10.1f", tonumber(reactor.output) or 0)
-    local line = string.format(
-      " %-10s %-11s %8s %12s  %s",
-      clip(reactor.name, 10),
-      clip(reactor.state, 11),
-      heat,
-      output,
-      reactor.reason or ""
+    local output = string.format("%.1f", tonumber(reactor.output) or 0)
+    self:setLine(
+      row,
+      formatColumns(self, reactor.name, reactor.state, heat, output, reactor.reason or ""),
+      STATE_COLORS[reactor.state] or "foreground"
     )
-    self:setLine(row, line, STATE_COLORS[reactor.state] or COLORS.foreground)
     row = row + 1
   end
 
-  while row <= self.height - 5 do
+  while row < separatorRow do
     self:setLine(row, "")
     row = row + 1
   end
 
-  self:setLine(self.height - 4, string.rep("-", self.width), COLORS.muted)
-  self:setLine(self.height - 3, " Recent events", COLORS.accent)
-  local logStart = math.max(1, #snapshot.logs - 1)
-  local targetRow = self.height - 2
+  self:setLine(separatorRow, string.rep("-", self.width), "muted")
+  local logRows = 2
+  local logStart = math.max(1, #snapshot.logs - logRows + 1)
+  local targetRow = separatorRow + 1
   for index = logStart, #snapshot.logs do
     local entry = snapshot.logs[index]
-    local color = entry.level == "ERROR" and COLORS.bad or (entry.level == "WARN" and COLORS.warning or COLORS.muted)
-    self:setLine(targetRow, string.format(" %7.2f %-5s %s", entry.time, entry.level, entry.message), color)
+    local color = entry.level == "ERROR" and "bad" or (entry.level == "WARN" and "warning" or "muted")
+    self:setLine(
+      targetRow,
+      string.format("%6.1f %s %s", entry.time, entry.level:sub(1, 1), entry.message),
+      color
+    )
     targetRow = targetRow + 1
   end
   while targetRow <= self.height do
@@ -141,8 +235,7 @@ function UI:close()
   if not self.enabled then
     return
   end
-  self.gpu.setBackground(0x000000)
-  self.gpu.setForeground(0xFFFFFF)
+  self:setColors("foreground", "background")
   self.gpu.fill(1, 1, self.width, self.height, " ")
 end
 
