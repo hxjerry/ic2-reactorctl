@@ -176,6 +176,38 @@ function hardware.findEmpty(stacks)
   return nil
 end
 
+function hardware.findMatching(stacks, expected)
+  for slot = 1, #stacks do
+    local candidate = stacks[slot]
+    if not hardware.isEmpty(candidate)
+        and candidate.name == expected.name
+        and candidate.damage == expected.damage then
+      return slot
+    end
+  end
+  return nil
+end
+
+function hardware.transfer(transposer, sourceSide, sinkSide, sourceSlot, sinkSlot, count)
+  local moved, reason = call(
+    transposer,
+    "transferItem",
+    sourceSide,
+    sinkSide,
+    count,
+    sourceSlot,
+    sinkSlot
+  )
+  if moved == nil then
+    return false, tostring(reason or "transfer failed")
+  end
+  if tonumber(moved) ~= tonumber(count) then
+    return false, string.format("transferred %s of %s items", tostring(moved), tostring(count))
+  end
+  return true
+end
+
+
 function hardware.swap(transposer, sourceSide, sinkSide, sourceSlot, sinkSlot, safe)
   local ok, result, reason = pcall(
     transposer.swap,

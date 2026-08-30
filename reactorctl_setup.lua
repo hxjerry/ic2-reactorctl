@@ -95,6 +95,12 @@ for _, address in ipairs(transposerAddresses) do
       address
     ))
   end
+  if not hardware.hasMethod(component, address, "transferItem") then
+    error(string.format(
+      "transposer %s has no transferItem method; this controller requires item transfer support",
+      address
+    ))
+  end
 end
 
 print("Reactor Controller commissioning")

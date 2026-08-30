@@ -148,6 +148,12 @@ function Controller:initialize()
         reactorConfig.transposer
       )
     end
+    if not hardware.hasMethod(self.component, reactorConfig.transposer, "transferItem") then
+      return nil, string.format(
+        "transposer %s has no transferItem method; OpenComputers item transfer is required",
+        reactorConfig.transposer
+      )
+    end
 
     local inventorySides, discoveryError = hardware.discoverInventorySides(transposer, self.config.inventoryTypes)
     if not inventorySides then
@@ -358,28 +364,44 @@ function Controller:flushOneStagingSlot(runtime)
   if not destinationStacks then
     return false, destinationError
   end
-  local destinationSlot = hardware.findEmpty(destinationStacks)
+  local destinationSlot = hardware.findMatching(destinationStacks, stagedStack)
+  local merge = destinationSlot ~= nil
+  destinationSlot = destinationSlot or hardware.findEmpty(destinationStacks)
   if not destinationSlot then
     return true
   end
 
-  local ok, swapError = hardware.swap(
+  local ok, transferError = hardware.transfer(
     runtime.transposer,
     runtime.sides.staging,
     runtime.sides[destination],
     stagingSlot,
     destinationSlot,
-    false
+    1
   )
-  if not ok then
-    return false, swapError
+  if not ok and merge then
+    destinationSlot = hardware.findEmpty(destinationStacks)
+    if destinationSlot then
+      merge = false
+      ok, transferError = hardware.transfer(
+        runtime.transposer,
+        runtime.sides.staging,
+        runtime.sides[destination],
+        stagingSlot,
+        destinationSlot,
+        1
+      )
+    end
   end
-  runtime.stagingDirty = true
+  if not ok then
+    return false, transferError
+  end
   self:log("INFO", string.format(
-    "%s: returned staged %s to %s inventory",
+    "%s: returned staged %s to %s inventory%s",
     runtime.config.name,
     tostring(stagedStack.name),
-    destination
+    destination,
+    merge and " stack" or ""
   ))
   return true
 end
@@ -410,7 +432,6 @@ function Controller:stageFresh(runtime, role, expectedName, minimumRemaining)
   if not stagingSlot then
     return nil, stagingError, stagingKind
   end
-
   local freshSlot, _, findError = self:findFresh(runtime, role, expectedName, minimumRemaining)
   if findError then
     return nil, findError, "io"
@@ -418,32 +439,32 @@ function Controller:stageFresh(runtime, role, expectedName, minimumRemaining)
   if not freshSlot then
     return nil, "no fresh " .. expectedName .. " is available", "unavailable"
   end
-
-  local ok, swapError = hardware.swap(
+  local moved, transferError = hardware.transfer(
     runtime.transposer,
     runtime.sides[role],
     runtime.sides.staging,
     freshSlot,
     stagingSlot,
-    false
+    1
   )
-  if not ok then
-    return nil, swapError, "io"
+  if not moved then
+    return nil, transferError, "io"
   end
   runtime.stagingDirty = true
 
   -- The provider inventory may be modified by ME or pipe automation between
-  -- discovery and the swap. Validate the isolated staging slot before it can
-  -- ever be inserted into the reactor.
+  -- discovery and the transfer. Validate the isolated staging slot before it
+  -- can ever be inserted into the reactor.
   local stagingStacks, validationError = hardware.scanInventory(runtime.transposer, runtime.sides.staging)
   if not stagingStacks then
     return nil, validationError, "io"
   end
   local staged = stagingStacks[stagingSlot]
   if hardware.isEmpty(staged)
+      or tonumber(staged.size) ~= 1
       or staged.name ~= expectedName
       or hardware.remainingFraction(staged) < minimumRemaining then
-    return nil, "provider changed before swap; unexpected item was isolated in staging", "invalid"
+    return nil, "provider changed before transfer; unexpected item or stack size was isolated in staging", "invalid"
   end
   return stagingSlot
 end
